@@ -1,83 +1,56 @@
-# 🚀 Streaming Data Dashboard: Project Guide
+# 🌊 Marine Weather Streaming Dashboard
 
-This project requires building a big data streaming dashboard using **Kafka** and **Streamlit**, featuring separate real-time and historical data views.
+Real-time and historical dashboard for marine conditions in Philippine waters.
+**Pipeline:** WeatherAPI Marine → Kafka → Spark Structured Streaming → MongoDB → Streamlit
 
-## 🎯 Architecture & Components
+## 1. The API used
+**WeatherAPI.com Marine API** (`https://api.weatherapi.com/v1/marine.json`).
+Query by latitude/longitude (`q`), number of days (`days`) and API key (`key`).
+It returns a JSON Marine object with hourly forecast data for a sea point, including
+significant wave height (`sig_ht_mt`), swell height/direction/period, wind speed,
+visibility, tides, and water temperature (`water_temp_c`, Pro+ plans only).
+The data is model-based forecast data (not buoy observations) and changes hourly, so the
+producer linearly interpolates between the current and next hour (`--no-interpolate` disables this).
+Monitored points: Manila Bay, Subic Bay, Cebu Strait, Davao Gulf, Batangas Bay.
 
-A **dual-pipeline** architecture separates live streaming from long-term storage and analysis.
+## 2. The pipeline implemented
+| Stage | Component | Role |
+|---|---|---|
+| Ingest | `producer.py` | Polls the API every 60 s, publishes one JSON message per metric/location (`timestamp`, `value`, `metric_type`, `sensor_id`, + location, unit, lat/lon) |
+| Buffer | Apache Kafka (KRaft) | Decouples producer from consumers; durable, replayable log (topic `marine-weather`) |
+| Process | `spark_stream.py` | Spark Structured Streaming reads Kafka, parses JSON, upserts raw readings into MongoDB, and computes 10-minute windowed avg/min/max/count per location+metric |
+| Store | MongoDB (`marine_db`) | `readings` (raw) and `aggregates` (Spark windows); unique indexes make writes idempotent |
+| Serve | `app.py` (Streamlit) | **Live tab** consumes Kafka directly (refresh every 15 s); **History tab** queries MongoDB with filters, hourly/daily/weekly aggregation, CSV and PNG export |
 
-| Pipeline | Flow | Output |
-| :--- | :--- | :--- |
-| **Real-time** | Kafka $\rightarrow$ Streamlit (Live Consumer) | `📈 Real-time Streaming View` |
-| **Historical** | Kafka $\rightarrow$ **HDFS OR MongoDB** $\rightarrow$ Streamlit (Query) | `📊 Historical Data View` |
+Dual path: a fast path (Kafka → Streamlit) for live monitoring and a durable path
+(Kafka → Spark → MongoDB → Streamlit) for history and aggregation.
 
-### Mandatory Components
-* Kafka Producer/Consumer.
-* **HDFS or MongoDB** integration.
-* Two-page Streamlit dashboard with charts.
-* Robust error handling.
+## 3. Significance of the dashboard
+The Philippines is an archipelago where fishing, ferries, cargo, and tourism depend on sea conditions.
+The Live tab lets operators see wave, swell, wind and visibility at a glance across several areas
+and judge whether conditions are safe for sailing. The History tab shows trends and extremes
+(e.g. which areas are consistently rough, when waves peak), supporting scheduling, safety advisories,
+and disaster preparedness. Aggregations (hourly/daily/weekly and Spark windows) turn many readings
+into comparable statistics, and CSV/PNG exports make results reusable in reports.
+Limitation: values are forecast-model outputs, so they should support, not replace, official advisories (PAGASA).
 
----
+## 4. Setup and run
+See the step-by-step guide: install Java 17, Miniconda, Kafka 3.7 (KRaft), MongoDB 7.0, then:
 
-## 💻 Technical Implementation Tasks
+```bash
+conda create -n bigdata python=3.10.13 -y && conda activate bigdata
+pip install -r requirements.txt
+cp .env.example .env          # add your WEATHERAPI_KEY
+# create topic once:
+~/kafka/bin/kafka-topics.sh --create --topic marine-weather --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1
+```
+Start in this order (each in its own terminal):
+```bash
+# 1) Kafka broker      2) mongod
+python spark_stream.py                 # Kafka -> MongoDB
+python producer.py                     # API -> Kafka
+streamlit run app.py --server.address 0.0.0.0
+```
 
-### 1. Data Producer (`producer.py`)
-Create a Kafka Producer that fetches real data from an **existing Application Programming Interface (API)** (e.g., a public weather API, stock market API, etc.).
-
-**Required Data Schema Fields:**
-* `timestamp` (ISO format)
-* `value` (Numeric)
-* `metric_type` (String)
-* `sensor_id` (String)
-
-### 2. Dashboard (`app.py`)
-Implement the Streamlit logic:
-* `consume_kafka_data()`: Real-time processing.
-* `query_historical_data()`: Data retrieval from storage.
-* Create interactive widgets (filters, time-range selector) for the Historical View.
-
-### 3. Storage Integration
-Implement data writing and querying for **ONE** of the following: **HDFS** or **MongoDB**.
-
----
-
-## 🏃‍♂️ Setup & Execution
-
-### Prerequisites
-Python 3.8+, Apache Kafka, HDFS **OR** MongoDB.
-
-### Setup
-1. **Setup environment**
-    - Download miniconda
-    - Create your python environment
-    ```bash
-    conda create -n bigdata python=3.10.13
-    ```
-2.  **Clone Repo & Install:**
-    ```bash
-    git clone [REPO_URL]
-    conda activate bigdata
-    pip install -r requirements.txt
-    ```
-3.  **Configure:** Set up Kafka and your chosen Storage System.
-4.  **Optional Environment File (`.env`):** Use for connection details.
-
-### Execution
-1.  **Start Kafka Broker** (and Controller).
-2.  **Start Producer:**
-    ```bash
-    python producer.py
-    ```
-3.  **Launch Dashboard:**
-    ```bash
-    streamlit run app.py
-    ```
-
----
-
-## 📦 Deliverables
-Submit the following files:
-* `app.py`
-* `producer.py`
-* `requirements.txt`
-* `README.md`
+## 5. Deliverables
+`app.py`, `producer.py`, `spark_stream.py`, `requirements.txt`, `README.md`
